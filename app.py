@@ -5,7 +5,7 @@ Beginner-friendly version with no classes!
 
 import streamlit as st
 import os
-from healthbuddy import ask_healthbuddy, get_all_doctors, add_new_doctor, get_api_keys_status, show_react_agent_workflow
+from healthbuddy import ask_healthbuddy, ask_with_simple_approach, get_all_doctors, add_new_doctor, get_api_keys_status, show_react_agent_workflow
 
 # Page setup
 st.set_page_config(
@@ -150,21 +150,32 @@ TAVILY_API_KEY = "your_actual_tavily_key"
     with tab3:
         st.markdown("### 📚 Example Questions")
         
-        st.markdown("Try asking HealthBuddy these questions:")
-        
+        st.markdown("Try asking HealthBuddy these more complex, multi-step questions:")
+
         example_questions = [
-            "What are the symptoms of diabetes?",
-            "I have chest pain, can you recommend a doctor?",
-            "What does research say about exercise and mental health?",
-            "I'm feeling anxious, what should I do?",
-            "What are the benefits of intermittent fasting?",
-            "I have a fever, what type of doctor should I see?"
+            # Forces research + doctor recommendation
+            "Can you summarize the latest research on intermittent fasting and diabetes management, and also recommend a doctor I could consult about this?",
+            
+            # Forces web search + doctor
+            "What are the 2025 CDC guidelines for heart disease prevention, and which cardiologist can I consult?",
+            
+            # Forces research only
+            "What do recent studies on exercise and mental health reveal, especially from arXiv papers?",
+            
+            # Forces doctor + web
+            "I have recurring migraines. Can you search for recent treatments and also recommend a neurologist I should consult?",
+            
+            # Forces doctor + research
+            "What does research say about new treatments for breast cancer, and which oncologist could I consult locally?",
+            
+            # Forces general + doctor fallback
+            "I have persistent cough and shortness of breath, what are possible causes and which specialist should I see?"
         ]
-        
+
         for question in example_questions:
             if st.button(f"❓ {question}", key=f"example_{question}"):
                 st.session_state.example_question = question
-        
+
         if hasattr(st.session_state, 'example_question'):
             st.markdown(f"**Selected:** {st.session_state.example_question}")
             
@@ -182,19 +193,21 @@ TAVILY_API_KEY = "your_actual_tavily_key"
                         st.exception(e)
                 else:
                     st.warning("⚠️ Please select a question first!")
+
+
     
     with tab4:
         st.markdown("### 🤖 React Agent Workflow")
         st.markdown("See how HealthBuddy's React agent works with LangGraph!")
-        
+
         # Show the workflow diagram
         workflow = show_react_agent_workflow()
         st.markdown(workflow)
-        
+
         st.markdown("---")
         st.markdown("### 🔍 Tool Calling in Action")
-        st.markdown("Watch the terminal/console to see which tools are being called!")
-        
+        st.markdown("Now you can watch each step unfold below:")
+
         # Test the React agent
         st.markdown("#### Test React Agent:")
         test_question = st.text_input(
@@ -202,39 +215,48 @@ TAVILY_API_KEY = "your_actual_tavily_key"
             placeholder="e.g., I have chest pain, recommend a doctor",
             key="react_test"
         )
-        
+
         if st.button("🚀 Test React Agent", key="test_react"):
             if test_question and test_question.strip():
                 try:
-                    # Create a placeholder for real-time updates
-                    status_placeholder = st.empty()
-                    answer_placeholder = st.empty()
-                    
                     with st.spinner("🤖 React Agent is working..."):
-                        status_placeholder.info("🔧 **React Agent Process:**")
-                        status_placeholder.info("1. 🤖 AI is analyzing your question...")
-                        status_placeholder.info("2. 🔍 AI is deciding which tools to use...")
-                        status_placeholder.info("3. ⚡ AI is calling the selected tools...")
-                        status_placeholder.info("4. 📝 AI is generating the final answer...")
-                        
-                        answer = ask_healthbuddy(test_question)
-                    
-                    status_placeholder.success("✅ **React Agent completed successfully!**")
-                    
-                    st.markdown("### 🤖 React Agent Response:")
-                    answer_placeholder.markdown(answer)
-                    
-                    st.markdown("---")
-                    st.markdown("### 🔍 Tool Calling Log:")
-                    st.info("💡 **Check the terminal/console below for detailed tool calling logs!**")
-                    st.code("""
-🤖 AI Response: TOOL: search_web
-🔍 AI wants to use: search_web
-🔍 Calling web search tool...
-🔍 Web search results: 3 items
-✅ HealthBuddy has an answer!
-                    """, language="text")
-                    
+
+                        # --- Accordion sections ---
+                        with st.expander("🤔 Reasoning", expanded=True):
+                            reasoning_box = st.empty()
+
+                        with st.expander("🔧 Tool Selection", expanded=True):
+                            tool_choice_box = st.empty()
+
+                        with st.expander("⚡ Tool Execution", expanded=True):
+                            tool_exec_box = st.empty()
+
+                        with st.expander("📝 Final Answer", expanded=True):
+                            answer_box = st.empty()
+
+                        # --- Call agent (modified to return logs) ---
+                        answer, logs = ask_with_simple_approach(test_question)
+
+                        # Step 1: Reasoning
+                        reasoning_box.success(logs["reasoning"])
+
+                        # Step 2: Tool Selection
+                        if logs["tools_selected"]:
+                            tool_choice_box.info(f"AI decided: use {', '.join(logs['tools_selected'])}.")
+                        else:
+                            tool_choice_box.warning("⚠️ AI didn’t clearly specify tools.")
+
+                        # Step 3: Tool Execution
+                        if logs["execution_log"]:
+                            for entry in logs["execution_log"]:
+                                tool_exec_box.write(entry)
+                            tool_exec_box.success("✅ Tool execution complete.")
+                        else:
+                            tool_exec_box.warning("⚠️ No tool execution log recorded.")
+
+                        # Step 4: Final answer
+                        answer_box.markdown(answer)
+
                 except Exception as e:
                     st.error(f"❌ Error: {str(e)}")
                     st.exception(e)

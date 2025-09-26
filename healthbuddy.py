@@ -27,6 +27,7 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+
 # Global variables (like a simple database)
 doctors_database = [
     {"name": "Dr. Janet Dyne", "specialization": "Endocrinology (Diabetes Care)", "available_timings": "10:00 AM - 1:00 PM", "location": "City Health Clinic", "contact": "janet.dyne@healthclinic.com"},
@@ -41,6 +42,55 @@ ai_model = None
 web_search_tool = None
 research_tool = None
 health_agent = None
+
+
+def ensure_healthbuddy_setup() -> bool:
+    """Ensure HealthBuddy is initialized before use."""
+    if ai_model and web_search_tool and research_tool and health_agent:
+        return True
+    return setup_healthbuddy()
+
+
+def _needs_doctor_recommendation(question: str) -> bool:
+    doctor_keywords = [
+        "doctor",
+        "specialist",
+        "physician",
+        "consult",
+        "consultation",
+        "appointment",
+        "cardiologist",
+        "neurologist",
+        "oncologist",
+        "dermatologist",
+        "psychiatrist",
+        "pediatrician",
+        "endocrinologist",
+        "gastroenterologist",
+        "surgeon",
+        "orthopedist",
+        "dentist"
+    ]
+    text = question.lower()
+    return any(keyword in text for keyword in doctor_keywords)
+
+
+def _needs_research_lookup(question: str) -> bool:
+    research_keywords = [
+        "research",
+        "study",
+        "studies",
+        "paper",
+        "papers",
+        "arxiv",
+        "clinical trial",
+        "evidence",
+        "meta-analysis",
+        "systematic review"
+    ]
+    text = question.lower()
+    return any(keyword in text for keyword in research_keywords)
+
 
 def setup_healthbuddy():
     """
@@ -149,9 +199,16 @@ def create_web_search_tool():
             )
             
             docs = results['results']
-            docs = [doc for doc in docs if doc.get("raw_content") is not None]
-            docs = ['## Title\n'+doc['title']+'\n\n'+'## Content\n'+doc['raw_content']+'\n\n'+'##Source\n'+doc['url'] for doc in docs]
-            
+            docs = [doc for doc in docs if doc.get("raw_content")]
+
+            # Limit raw_content to first 500 characters (enough for context)
+            docs = [
+                "## Title\n" + doc['title'] +
+                "\n\n## Content (truncated)\n" + doc['raw_content'][:500] + "..." +
+                "\n\n## Source\n" + doc['url']
+                for doc in docs
+            ]
+
             print(f"✅ Found {len(docs)} web results")
             return docs
             
@@ -259,7 +316,8 @@ def ask_healthbuddy(question):
             return call_agent_with_streaming(question)
         else:
             print("⚠️ Using simplified approach...")
-            return ask_with_simple_approach(question)
+            answer, _ = ask_with_simple_approach(question)
+            return answer
         
     except Exception as e:
         print(f"❌ Error: {e}")
@@ -273,21 +331,27 @@ def call_agent_with_streaming(query):
     
     try:
         # Stream the agent's execution with the given query (EXACT SAME as original)
+        final_event = None
         for event in health_agent.stream(
             {"messages": [HumanMessage(content=query)]}, # input prompt
             stream_mode='values'  # Stream output as intermediate values
         ):
             # Print each intermediate message step-by-step
             print(f"🔄 Agent step: {event['messages'][-1]}")
+            final_event = event
         
         # Get the final response
-        final_response = event["messages"][-1].content
+        if not final_event:
+            raise RuntimeError("React agent stream returned no events")
+
+        final_response = final_event["messages"][-1].content
         print("✅ React Agent: Final answer generated!")
         return final_response
         
     except Exception as e:
         print(f"❌ React agent streaming error: {e}")
-        return ask_with_simple_approach(query)
+        answer, _ = ask_with_simple_approach(query)
+        return answer
 
 def ask_with_react_agent(question):
     """
@@ -313,104 +377,142 @@ def ask_with_react_agent(question):
         
     except Exception as e:
         print(f"❌ React agent error: {e}")
-        return ask_with_simple_approach(question)
+        answer, _ = ask_with_simple_approach(question)
+        return answer
 
 def ask_with_simple_approach(question):
     """
-    Use simple approach with visual tool calling feedback
+    Simple React-like approach with tool calling and structured logging.
+    Returns (answer, logs) so both console and UI can stay in sync.
     """
     print("🔧 Simple approach: Let AI decide...")
-    
+
+    if not ensure_healthbuddy_setup():
+        error_message = "❌ HealthBuddy setup failed. Please check your API keys in `.streamlit/secrets.toml`"
+        return error_message, {
+            "reasoning": error_message,
+            "tools_selected": [],
+            "execution_log": []
+        }
+
+    if ai_model is None:
+        error_message = "❌ AI model is not initialized"
+        return error_message, {
+            "reasoning": error_message,
+            "tools_selected": [],
+            "execution_log": []
+        }
+
     # Create tools for manual calling with visual feedback
     tools = {
         "search_web": create_web_search_tool(),
-        "search_arxiv": create_research_tool(), 
+        "search_arxiv": create_research_tool(),
         "recommend_doctor": create_doctor_tool()
     }
-    
-    # Enhanced prompt that tells the AI to use tools
-    system_prompt = """You are an agent designed to act as an expert in researching on medical symptoms
-and also recommend relevant doctors for booking appointments.
-Also remember the current year is 2025 and use the same for all search queries when no specific dates are mentioned.
 
-Given an input user query call relevant tools and give the most appropriate response.
-Follow some of these guidelines to help you make more informed decisions:
-  - If the user's query specifies recommending a doctor only then recommend an appropriate doctor
-  - If the user is researching on detailed and specific aspects around symptoms, treatments and other aspects related to healthcare
-  use both search_web and search_arxiv tools to get comprehensive information and then give a well-structured response
-  - If the user is just looking for general information around healthcare then web search is enough
-  - Use search_arxiv tool only if the query is related to information which might be found in research papers
-  - Response should include cited source links and \ or arXiv Article Title, Publication Dates if available
-  - If recommending doctors then use the recommend_doctor and show detailed information in a nice structured way and recommend them to book an appointment via email
-  - Politely decline answering any queries not related to medical or healthcare information
+    # Enhanced system prompt
+    system_prompt = """You are HealthBuddy, an AI healthcare assistant.
+
+Rules:
+- You MUST call at least one tool before answering a question. Never answer directly without tool use.
+- If the query is about general health info (symptoms, causes, treatments, advice), use TOOL: search_web.
+- If the query mentions research, studies, or papers, use TOOL: search_arxiv.
+- If the query asks about a doctor, specialist, or consultation, you MUST use TOOL: recommend_doctor.
+- If the query mixes research + doctor, you MUST call both tools step by step.
+- NEVER invent or fabricate doctors. Only use doctors from the database provided by the `recommend_doctor` tool.
 
 IMPORTANT: When you need to use tools, respond with:
 - "TOOL: search_web" for web search
-- "TOOL: search_arxiv" for research papers  
+- "TOOL: search_arxiv" for research papers
 - "TOOL: recommend_doctor" for doctor recommendations
-- "TOOL: none" if no tools needed
 
-Then I will call the appropriate tool and give you the results."""
-    
+There is NO "TOOL: none" option. Always select at least one tool.
+"""
     messages = [
         SystemMessage(content=system_prompt),
         HumanMessage(content=question)
     ]
-    
-    response = health_agent.invoke(messages)
-    ai_response = response.content
-    
+
+    response = ai_model.invoke(messages)
+    ai_response = getattr(response, "content", response)
+
+    # --- Logging structure ---
+    logs = {
+        "reasoning": ai_response,          # raw AI thought process
+        "tools_selected": [],              # which tools AI decided
+        "execution_log": [],               # step by step execution trace
+    }
+
     print(f"🤖 AI Response: {ai_response}")
-    
-    # Check if AI wants to use tools
+
+    # --- Determine tool plan (AI suggestion + rule-based enforcement) ---
+    tool_plan = []
     if "TOOL: search_web" in ai_response:
-        print("🔍 AI wants to use: search_web")
-        print("🔍 Calling web search tool...")
-        web_results = tools["search_web"].invoke({"query": question})
-        print(f"🔍 Web search results: {len(web_results) if isinstance(web_results, list) else 'N/A'} items")
-        
-        # Get final answer with web results
+        tool_plan.append("search_web")
+    if "TOOL: search_arxiv" in ai_response:
+        tool_plan.append("search_arxiv")
+    if "TOOL: recommend_doctor" in ai_response:
+        tool_plan.append("recommend_doctor")
+
+    if _needs_research_lookup(question) and "search_arxiv" not in tool_plan:
+        logs["execution_log"].append("ℹ️ Added search_arxiv because the question references research/studies.")
+        tool_plan.append("search_arxiv")
+
+    if _needs_doctor_recommendation(question) and "recommend_doctor" not in tool_plan:
+        logs["execution_log"].append("ℹ️ Added recommend_doctor because the question requests a doctor.")
+        tool_plan.append("recommend_doctor")
+
+    if not tool_plan:
+        logs["execution_log"].append("ℹ️ No tool selected by AI; defaulting to search_web.")
+        tool_plan.append("search_web")
+
+    # --- Run tools in plan order (deduplicated) ---
+    tool_outputs = {}
+    executed_tools = set()
+
+    for tool_name in tool_plan:
+        if tool_name in executed_tools:
+            continue
+        executed_tools.add(tool_name)
+        logs["tools_selected"].append(tool_name)
+
+        if tool_name == "search_web":
+            print("🔍 Executing: search_web")
+            web_results = tools["search_web"].invoke({"query": question})
+            logs["execution_log"].append(
+                f"search_web returned {len(web_results) if isinstance(web_results, list) else 'N/A'} results"
+            )
+            tool_outputs["web"] = web_results
+
+        elif tool_name == "search_arxiv":
+            print("📚 Executing: search_arxiv")
+            research_results = tools["search_arxiv"].invoke({"query": question})
+            logs["execution_log"].append(
+                f"search_arxiv returned {len(research_results) if isinstance(research_results, list) else 'N/A'} papers"
+            )
+            tool_outputs["arxiv"] = research_results
+
+        elif tool_name == "recommend_doctor":
+            print("👨‍⚕️ Executing: recommend_doctor")
+            doctor_results = tools["recommend_doctor"].invoke({"query": question})
+            logs["execution_log"].append(f"recommend_doctor returned: {doctor_results}")
+            tool_outputs["doctor"] = doctor_results
+
+    # --- Final synthesis step ---
+    if tool_outputs:
         final_messages = [
-            SystemMessage(content="You are a helpful healthcare assistant. Use the search results to provide a comprehensive answer."),
-            HumanMessage(content=f"Question: {question}\n\nWeb Search Results: {web_results}\n\nProvide a detailed answer based on the search results.")
+            SystemMessage(content="You are a helpful healthcare assistant. Combine all tool results into a single comprehensive answer."),
+            HumanMessage(content=f"Question: {question}\n\nTool Results: {tool_outputs}\n\nWrite a clear, structured answer. Always include doctor info if available.")
         ]
-        final_response = health_agent.invoke(final_messages)
-        answer = final_response.content
-        
-    elif "TOOL: search_arxiv" in ai_response:
-        print("📚 AI wants to use: search_arxiv")
-        print("📚 Calling research tool...")
-        research_results = tools["search_arxiv"].invoke({"query": question})
-        print(f"📚 Research results: {len(research_results) if isinstance(research_results, list) else 'N/A'} papers")
-        
-        # Get final answer with research results
-        final_messages = [
-            SystemMessage(content="You are a helpful healthcare assistant. Use the research results to provide a comprehensive answer."),
-            HumanMessage(content=f"Question: {question}\n\nResearch Results: {research_results}\n\nProvide a detailed answer based on the research papers.")
-        ]
-        final_response = health_agent.invoke(final_messages)
-        answer = final_response.content
-        
-    elif "TOOL: recommend_doctor" in ai_response:
-        print("👨‍⚕️ AI wants to use: recommend_doctor")
-        print("👨‍⚕️ Calling doctor recommendation tool...")
-        doctor_results = tools["recommend_doctor"].invoke({"query": question})
-        print(f"👨‍⚕️ Doctor recommendation: {doctor_results}")
-        
-        # Get final answer with doctor recommendation
-        final_messages = [
-            SystemMessage(content="You are a helpful healthcare assistant. Use the doctor recommendation to provide a comprehensive answer."),
-            HumanMessage(content=f"Question: {question}\n\nDoctor Recommendation: {doctor_results}\n\nProvide a detailed answer with the doctor information.")
-        ]
-        final_response = health_agent.invoke(final_messages)
-        answer = final_response.content
-        
+        final_response = ai_model.invoke(final_messages)
+        answer = getattr(final_response, "content", final_response)
     else:
-        print("💭 AI doesn't need tools - using general response")
+        logs["execution_log"].append("⚠️ AI didn't specify tools clearly — falling back to direct response")
         answer = ai_response
-    
+
     print("✅ HealthBuddy has an answer!")
-    return answer
+    return answer, logs
+
 
 def get_api_keys_status():
     """
